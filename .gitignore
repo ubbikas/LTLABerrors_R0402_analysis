@@ -1,0 +1,51 @@
+
+#############
+## Windows detritus
+#############
+
+# Windows image file caches
+Thumbs.db
+ehthumbs.db
+
+# Folder config file
+Desktop.ini
+
+# Recycle Bin used on file shares
+$RECYCLE.BIN/
+
+# Mac crap
+.DS_Store
+
+
+# csv data
+*.csv
+
+# DB
+*.sqlite
+
+# R history
+*.Rhistory
+
+# EXCEL files
+*.xlsx
+
+# AX PP files
+*.PP
+
+# MG ygx files
+*.ygx
+
+# txt files
+*.txt
+
+# DB backup files
+*.backup
+
+# hidden files
+*.hidden
+
+# archives
+*.zip
+
+# r data files
+*.rds

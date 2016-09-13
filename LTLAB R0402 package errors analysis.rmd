@@ -1,0 +1,894 @@
+---
+title: "R0402 korpuso SMT prametimų analizė"
+author: "Andrius Nazarovas"
+date: "July 28, 2016"
+output: 
+  html_document:
+    theme: readable
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r results='hide', message=FALSE, warning=FALSE, echo=FALSE}
+suppressPackageStartupMessages(require(dplyr))
+suppressPackageStartupMessages(require(sqldf))
+suppressPackageStartupMessages(require(lubridate))
+suppressPackageStartupMessages(require(ggplot2))
+suppressPackageStartupMessages(require(scales))
+suppressPackageStartupMessages(require(broom))
+suppressPackageStartupMessages(require(tidyr))
+```
+
+```{r echo=FALSE}
+DBFileName <- "LTLABerrors.sqlite"
+errors_db_sqlite <- src_sqlite(DBFileName)
+errors_sqlite <- tbl(errors_db_sqlite, "HOUR_ERRORS")
+
+daily_temp <- read.csv("daily_temperatures.csv", stringsAsFactors = FALSE)
+temp <- read.csv("temp.csv", stringsAsFactors = FALSE)
+```
+
+
+## Problema
+
+
+Montuojant R0402 korpuso komponentus, pasitaiko didelis jų prametimo procentas, t.y. robotai (mašinose AX301 ir AX501, *Assembléon*) komponento nepaima arba paima neteisingai - už briaunos ar kampo. Abiem atvejais komponentai yra prametami ir dažniausiai sunkiai iš naujo panaudojami. Kadangi šio korpuso komponentai yra vieni is populiariausių,
+net ir sąlyginai nedidelis prametimo procentas gali sudaryti šimtus ar net tūkstančius prarastų komponentų. Panagrinėjus jų nepaėmimo ar blogo paėmimo priežastis, galime pastebėti jog šie feeder'io prasukimo momentu yra paveikiami įpakavimo juostos viršutinės nuplėšiamos dalies, prie jos lyg prilimpa ar prikimba ir yra arba kartu nutraukiami į viršų arba paverčiami ant šono, dėl ko yra blogai paimami roboto.
+
+Ši problema yra ne su visais R0402 korpuso komponentais - dažniausiai galima išskirti keletą, kurių prametimo procentas ypač didelis, kitų gali būti ir mažesnis, viršijantis mūsų nurodomą normalų t.y. 0.2%, o dar kitų  - visai nemėtyti. Atrodytų, jog kaltas įpakavimas, nes buvo ismėginta daugmaž viskas: pakeista komponento vieta mašinoje (taigi ima kitas robotas), pakeisti feeder'iai (išmeginti bent keletas), pakeistos paėmimo nosys, tačiau niekas prametimo procentui įtakos nedarė.
+
+Vienas galimas problemos paaiškinimas yra įpakavimo juostoje besikaupiantis statinis krūvis, kuris ir pakelia ar išjudina mūsų nagrinėjamus komponentus. R0402 yra lengvesni nei pavyzdžiui C0402, su kuriais aptariamos problemos niekada nebūna. Kodėl susidaro statinis krūvis? Viena iš priežasčių yra mažas santykinis oro drėgnumas - krūvis neturi terpės (vandens ore) pasišalinimui. Kadangi neturime šio rodiklio istorinių duomenų laboratorijoje, pasikliaujame logika - dažniausiai mažas oro drėgnumas būna šaltuoju metų laiku, kuomet yra šildomos patalpos. Ar yra priklausomybė tarp lauko oro temperatūros ir komponentų prametimo procento? Nuo to ir pradėsime.
+
+
+## Prametimai agreguoti mėnesiais
+
+
+Prametimų duomenys yra fiksuojami valandos tikslumu, tačiau pirmiausia pažiūrėsime, kokiais mėnesiais yra didžiausias pramestų komponentų procentas. Tiriamas laikotarpis: 2015-01-01 - 2016-06-30. Raudona linija - 0.2% prametimų riba.
+
+
+```{r, fig.width=8, fig.height=4, echo=FALSE}
+errors_sqlite %>%
+  filter(PackageTypeName == c("R0402")) %>%
+  filter(Date >= "2015-01-01", Date < "2016-07-01") %>%
+  group_by(Date, PackageTypeName) %>%
+  select(-Time, -Machine, -ProcessProgramID, -PMSlot, 
+         -FeederSlot, -FeederLane, -FeederType) %>%
+  summarise_each(funs(sum)) %>% 
+  as.data.frame() %>%
+  mutate(., ErrorsSum  = rowSums(.[ ,3:13])) %>%
+  mutate(., Placed  = rowSums(.[ ,14:15])) %>%
+  select(-(AutoRepickAfterPickError:NumberOfCAlignPlacements)) %>%
+  mutate(Date = format(as.Date(Date), format = "%Y-%m")) %>%
+  group_by(Date, PackageTypeName) %>%
+  summarise(ErrorsSum = sum(ErrorsSum),
+            Placed = sum(Placed),
+            Percent = as.numeric(paste(round(ErrorsSum/Placed*100,2), sep = ""))) %>%
+  left_join(temp, by = "Date") %>%
+  rename(Temperature = Temp) -> monthly_data 
+
+
+monthly_data %>% 
+  ggplot(aes(x = Date, y = Percent)) +
+  geom_bar(stat = "identity") +
+  geom_abline(slope = 0, 
+              intercept = 0.2,
+              color = "red") +
+  scale_y_continuous(breaks = c(0, 0.2, 1, 2)) +
+  theme_bw() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+```
+
+
+Matome, kad tik šaltaisiais metų mėnesiais (ypač sausį, vasarį, kovą) prametimų procentas pakyla aukštai virš 0.2% ribos. Toliau pažvelgsime į prametimo procentų priklausomybę nuo vidutinės mėnesio temperatūros.
+
+
+```{r, fig.width=8, fig.height=4, echo=FALSE}
+monthly_data %>% 
+  ggplot(aes(x = Temperature, y = Percent)) +
+  geom_point(size = 2,
+             color = "grey25") +
+  geom_smooth(method = "lm", se = FALSE) +
+  theme_bw()
+```
+
+
+Grafike taip pat nubrėžta tiesinės regresijos tiesė, gauta naudojant mažiausių kvadratų metodą. Nors priklausomybė ir nėra visiškai tiesinė (esant virš 5°C prametimai yra panašūs), tendencija aiskiai matoma - esant žemesnei nei 5°C vidutinei mėnesinei temperatūrai, prametimai didėja. Galime pažvelgti į tiesinės regresijos modelio statistikas:
+
+
+```{r, echo=FALSE}
+summary(lm(Percent ~ Temperature, data = monthly_data))
+```
+
+
+Rezultatai tik dar kartą patvirtina esant (statistiškai reikšmingai net su labai mažu alpha) neigiamai priklausomybei tarp temperatūros ir prametimų procento: vidutinei mėnesio temperatūrai sumažėjus 1°C, prametimai padidėja 0.07%. 
+
+Šiek tiek tikslesnį modelį gautume apriboję maksimalią temperatūra, nes, kaip matome, virš 5°C prametimai yra panašūs, taigi šią ribą ir pasirenkame - jei temperatūra viršija 5°C, ją apibrėžiame kaip 5°C. Gauname tokius duomenis:
+
+
+```{r, fig.width=8, fig.height=4, echo=FALSE}
+monthly_data %>% 
+  mutate(Temperature = pmin(5, Temperature)) -> monthly_data_capped
+  
+monthly_data_capped %>% 
+  ggplot(aes(x = Temperature, y = Percent)) +
+  geom_point(size = 2, 
+             color = "grey25") +
+  geom_smooth(method = "lm", se = FALSE) +
+  theme_bw()
+```
+
+
+```{r, echo=FALSE}
+summary(lm(Percent ~ Temperature, data = monthly_data_capped))
+```
+
+
+Matome, kad šis modelis dar tikslesnis, o gauto rezultato interpretacija: vidutinei mėnesio temperatūrai sumažėjus 1°C, prametimai padidėja 0.2%, taigi beveik 3 kartus daugiau nei pirmo modelio atveju. Taip pat visų mėnesių, kurių temperatūras apribojome, prametimų procentas neviršija 0.5% ribos, t.y. nėra labai aukštas.
+
+Nors ir galime teigti, jog oro temperatūra lauke koreliuoja su R0402 korpuso komponentų prametimų procentu, negalime pasakyti kokia visgi yra daroma įtaka. Vieni iš galimų variantų yra šie:
+
+- Komponentai paveikiami juos transportuojant, t.y. lauko temperatūra tiesiogiai paveikia įpakavimus.
+- Lauko temperatūra netiesiogiai (per būtinybę šildyti patalpas) paveikia komponentus, tik neaišku ar jų sandėliavimo metu, ar būtent surinkimo momentu.
+- Galbūt priklausomybė yra ne tik nuo lauko oro temperatūros, bet ir nuo kitų rodiklių: santykinės oro drėgmės, lietaus kiekio ir pan.
+
+Į šiuos klausimus galime atsakyti tik tikslindami mūsų turimus duomenis - tirsime kasdieninius parodymus.
+
+
+## Kasdienių parodymų analizė
+
+
+Dieniniai oro parodymai yra surinkti iš https://www.wunderground.com/history/airport/EYVI/ puslapio, jame pateikiami istoriniai Vilniaus oro uosto matavimai. Surinkti šie rodikliai:
+
+- Min.Temperature - mažiausia dienos temperatūra
+- Mean.Temperature - vidutinė dienos temperatūra
+- Max.Temperature - didžiausia dienos temperatūra
+- Dew.Point - rasos taško temperatūra
+- Minimum.Humidity - mažiausia dienos santykinė oro drėgmė
+- Average.Humidity - vidutinė dienos santykinė oro drėgmė
+- Maximum.Humidity - didžiausia dienos santykinė oro drėgmė
+- Wind.Speed - vidutinis dienos vėjo greitis
+- Max.Wind.Speed - didžiausias dienos vėjo greitis
+- Precipitation - lietaus kiekis
+- Sea.Level.Pressure - slėgis
+
+Tuo tarpu kasdieniai prametimų duomenys yra apribojami mažiausiai 1000 padėtų R0402 korpuso komponentų kiekiu, taip atmetant įvairius prototipų rinkimus, kurių metu naudojamos juostelių atkarpos padidina prametimo procentą, taip išbalansuodamos duomenis. Po filtravimo išlieka apie 90% dienų rodmenų (252 iš 281) iš viso tiriamo laikotarpio.
+
+
+Visų pirma paskaičiuojame, kaip prametimo procentas priklauso nuo kiekvieno tos dienos oro matavimo:
+
+
+```{r, echo=FALSE}
+errors_sqlite %>%
+  filter(PackageTypeName == c("R0402")) %>%
+  filter(Date >= "2015-01-01", Date < "2016-07-01") %>%
+  group_by(Date, PackageTypeName) %>%
+  select(-Time, -Machine, -ProcessProgramID, -PMSlot, 
+         -FeederSlot, -FeederLane, -FeederType) %>%
+  summarise_each(funs(sum)) %>% 
+  as.data.frame() %>%
+  mutate(., ErrorsSum  = rowSums(.[ ,3:13])) %>%
+  mutate(., Placed  = rowSums(.[ ,14:15])) %>%
+  select(-(AutoRepickAfterPickError:NumberOfCAlignPlacements)) %>%
+  group_by(Date, PackageTypeName) %>%
+  summarise(ErrorsSum = sum(ErrorsSum),
+            Placed = sum(Placed),
+            Percent = as.numeric(paste(round(ErrorsSum/Placed*100,2), sep = ""))) %>%
+  filter(Placed > 1000) %>%
+  left_join(daily_temp, by = "Date") %>%
+  ungroup() -> daily_data
+
+
+daily_data_tidy <- daily_data %>% 
+                   select(-PackageTypeName, -ErrorsSum, -Placed, -X) %>%
+                   gather(measurement, value, -Percent, - Date) %>%
+                   as.data.frame()
+
+daily_data_tidy %>%
+  group_by(measurement) %>%
+  do(model = lm(Percent ~ value, data = .)) %>%
+  tidy(model) %>%
+  filter(term == "value") %>%
+  ungroup() %>%
+  arrange(p.value) %>% 
+  select(-std.error, -statistic, -term) %>% 
+  knitr::kable(digits = 16)
+```
+
+
+Matome, jog statistiškai reikšmingi (su alpha = 0.01) kintamieji yra rasos taško temperatūra, taip pat mažiausia, didžiausia ir vidutinė dienos temperatūros. Net ir įtraukę keletos praeitų dienų rodiklių vėluojančias reikšmes, gauname tokį patį rezultatą - likę rodikliai nėra reikšmingi. Vadinasi prametimo procentas yra tiesiškai priklausomas nuo šių keturių rodiklių. Taip pat matome, jog iš reikšmingų rodiklių didžiausia įtaką prametimo procentui daro rasos taško temperatūra ir mažiausia dienos temperatūra. Paskaičiavę koreliacijos koeficientą tarp jų gauname `r daily_data %>% with(cor(Dew.Point, Min.Temperature)) %>% round(3)`. Turėdami toki didelį koreliacijos koeficientą, galime vieną iš šie rodiklių naudoti kaip pakaitalą kitam, todėl pasirenkame mažiausią dienos lauko oro temperatūrą, kaip paprastesnį ir lengviau paskaičiuojamą ar pamatuojamą. Nuo dabar tirsime tik tik prametimo procento priklausomybę nuo pasirinkto rodiklio. Pirmiausia pažvelgsime į jų sklaidos grafiką:
+
+
+```{r, fig.width=8, fig.height=4, echo=FALSE}
+ggplot(daily_data, aes(x = Min.Temperature, y = Percent)) +
+  geom_point(size = 1.5, 
+             color = "black",
+             alpha = 0.5) +
+  stat_smooth(fill = NA) +
+  theme_bw()
+```
+
+Mėlyna spalva išbrėžta glotninta priklausomybės kreivė. Matome, kad panašiai kaip ir tiriant mėnesiais agreguotus duomenis, prametimo procentas ima didėti pasiekus žemesne oro temperatūrą - apie 0°C, ir temperatūrai smingant žemyn procentas irgi kyla. O temperatūrai esant didesnei nei 0°C, prametimų procentas išlieka panašus, netoli 0% ribos, kurios negali kirsti. Tą labai gerai galime pastebėti sekančiame grafike:
+
+
+```{r, fig.width=10, fig.height=4, echo=FALSE}
+ggplot(daily_data, aes(x = as.Date(Date), y = Percent)) +
+  geom_line(aes(group = 1, 
+                colour = "Percent"), 
+            size = 0.8,
+            alpha = 0.8) +
+  geom_line(aes(y = Min.Temperature, 
+                group = 1,
+                colour = "Temperature"), 
+            size = 0.8,
+            alpha = 0.8) +
+  scale_x_date(labels = date_format("%Y-%m"), date_breaks = "1 month") +
+  scale_colour_manual(name = "",
+                      values = c("Percent" = "grey25",
+                                 "Temperature" = "red")) +
+  xlab("Date") +
+  ylab("") +
+  theme_bw() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+```
+
+
+Grafike gerai pastebima tendencija, kuomet temperatūros kritimą žemiau 0°C ribos dažnai atkartoja prametimo procento padidėjimas, o pakilimas virš 0°C - prametimo procento išlaikymą netoli 0%. Kadangi toks pakilimas nedaro tolimesnės įtakos prametimo procento pokyčiui, galime sutarti, jog visos dienos, kurių mažiausia temperatūra buvo virš 0°C, ir yra apribotos šia temperatūros riba. Tuomet galime pamatyti tokį linijinį grafiką:
+
+
+```{r, fig.width=10, fig.height=4, echo=FALSE}
+daily_data %>%
+  mutate(capped_temp = ifelse(Min.Temperature > 0, 
+                              0, 
+                              Min.Temperature)) -> daily_capped_data
+
+ggplot(daily_capped_data, aes(x = as.Date(Date), y = Percent)) +
+  geom_line(aes(group = 1, 
+                colour = "Percent"), 
+            size = 0.8,
+            alpha = 0.8) +
+  geom_line(aes(y = capped_temp, 
+                group = 1,
+                colour = "Temperature\n(capped at 0°C)"), 
+            size = 0.8,
+            alpha = 0.8) +
+  scale_x_date(labels = date_format("%Y-%m"), date_breaks = "1 month") +
+  scale_colour_manual(name = "",
+                      values = c("Percent" = "grey25",
+                                 "Temperature\n(capped at 0°C)" = "red")) +
+  xlab("Date") +
+  ylab("") +
+  theme_bw() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+```
+
+
+Šiame grafike dar geriau galime įžiūrėti temperatūros ir prametimo procento pokyčių atsikartojamumą - temperatūrai mažėjant prametimo procentas didėja, o esant ties 0°C riba (kas nurodo temperatūrą esant 0°C arba daugiau) prametimo procentas tik retkarčiais pakyla virš minimalios ribos, greičiausiai dėl kitų, šalutinių priežasčių. Taip pat galima pastebėti bent kelias pozicijas, kuriose priklausomybė lyg ir vėluoja, temperatūrai nukritus, tik po dienos ar kelių matomas prametimų procento šuolis. Galbūt temperatūros kritimas sukelia kelias dienas trunkantį efektą? Taip pat mažiausia dienos temperatūra gali būti tos dienos vakare ar dar veliau, taigi efektas bus jauciamas tik kitą dieną. Praėjusių dienų efektą prametimo procentui patyrinėsime kiek vėliau, o dabar pažvelkime į mūsų tiriamos priklausomybės tiesinės regresijos parametrų statistikas:
+
+
+```{r, echo=FALSE}
+summary(lm(Percent ~ capped_temp, data = daily_capped_data))
+```
+
+
+Pirmiausia galime atkreipti dėmesį į temperatūros kintamojo p-reikšmę: jei tartume, jog prametimo procentas tiesiškai nepriklauso nuo lauko temperatūros, p-reikšmė parodo tikimybę, kad mes gautume tokius rodiklių parodymus, kokius turime. Kadangi mūsų gauta p-reikšmė yra mažesnė nei 2.2e-16, t.y. beveik lygi 0 (taigi ir tikimybė, jog turimus rodikliu duomenis gavome atsitiktinai yra beveik lygi 0%), tai įrodo, jog prametimo procentas yra tiesiškai priklausomas nuo temperatūros. Gauta priklausomybė yra panaši kaip ir tiriant mėnesinius duomenis - temperatūrai nukritus 1°C, prametimo procentas paauga 0.269%. Galiausiai galime pastebėti, jog jei oro temperatūra yra lygi 0 (pagal mūsų apibrėžimą - lygi arba didesnė nei 0°C ), prametimo procentas vidutiniškai yra ~0.42%. Tai yra gerokai daugiau nei deklaruojamas 0.2%, vadinasi yra ir daugiau veiksnių, dėl kurių prametimo procentas išauga. Vienas iš tokių veiksnių gali būti prametimo procento priklausomybė ne tik nuo einamos dienos mažiausios lauko temperatūros, kurią iki šiol ir nagrinėjome, bet ir nuo praėjusių dienų mažiausios temperatūros - ar mūsų rastas efektas išlieka kelias dienas? Tą ir patyrinėsime.
+
+
+## Išliekantis mažiausios lauko oro temperatūros efektas
+
+
+Matėme, kad prametimo procentas stipriai priklauso nuo tos dienos mažiausios lauko oro temperatūros. O jeigu maža temperatūra buvo diena ar dvi prieš tai, ar šis efektas yra pastebimas? Pirmiausia sugriežtinsime tiriamos priklausomybės sąlygas: tirsime tik tas dienas, kuriomis prametimo procentas buvo didesnis už normalų 0.2%. Tokiu būdu pašalinsime neproblemines dienas, dažniausiai (>90%) šiltesnes nei 0°C, ir tirsime likusių didesnių prametimo procentų priklausomybę nuo prieš tai buvusių dienų mažiausios temperatūros. Taip pat reikšmingomis laikysime tas priklausomybes, kurių šansas susidaryti atsitiktinai yra mažiau nei 0.1%. Sekančiame grafike vaizduojame einamos ir 30 vėluojančių dienų efektą:
+
+
+```{r, fig.width=10, fig.height=4, echo=FALSE}
+errors_sqlite %>%
+  filter(PackageTypeName == c("R0402")) %>%
+  filter(Date >= "2015-01-01", Date < "2016-07-01") %>%
+  group_by(Date) %>%
+  select(-PackageTypeName, -Machine, -Time, -ProcessProgramID, -PMSlot, 
+         -FeederSlot, -FeederLane, -FeederType) %>%
+  summarise_each(funs(sum)) %>% 
+  as.data.frame() %>%
+  mutate(., ErrorsSum  = rowSums(.[ ,2:12])) %>%
+  mutate(., Placed  = rowSums(.[ ,13:14])) %>%
+  select(-(AutoRepickAfterPickError:NumberOfCAlignPlacements)) %>%
+  group_by(Date) %>%
+  summarise(ErrorsSum = sum(ErrorsSum),
+            Placed = sum(Placed),
+            Percent = as.numeric(paste(round(ErrorsSum/Placed*100,2), sep = ""))) %>%
+  filter(Placed > 1000) %>% 
+  right_join(daily_temp, by = "Date") %>%
+  select(Date, Percent, Min.Temperature, Placed) -> all_dates_data
+
+
+data_lag <- function(lagval, data) {
+  data_new <- data
+  data_new$lag <- lagval
+  data_new %>%
+    mutate(min_temp = lag(Min.Temperature, lagval),
+           min_temp_cap = ifelse(min_temp > 0, 0, min_temp)) %>%
+    select(Date, Percent, min_temp, min_temp_cap, lag) %>%
+    na.omit()
+}
+
+
+lapply(0:30, data_lag, data = all_dates_data) %>% 
+  bind_rows() %>%
+  filter(Percent > 0.2) %>%
+  group_by(lag) %>%
+  do(model = lm(Percent ~ min_temp_cap, data = .)) %>%
+  tidy(model) %>%
+  filter(term != "(Intercept)") %>%
+  ungroup() %>%
+  mutate("Significant" = ifelse(p.value < 0.001, "Yes", "No")) %>%
+  ggplot(aes(x = lag, y = estimate)) +
+  geom_line() +
+  geom_point(aes(color = Significant), size = 2.3) +
+  geom_text(aes(label = lag), nudge_y = 0.02, size = 2.5) +
+  xlab("Lag") +
+  ylab("Estimated effect") +
+  theme_bw()
+```
+
+
+Statistiškai reikšmingas ir kartu darantis didžiausią įtaką yra einamos ir prieš tai buvusių 4 dienų temperatūros efektas, o labiau vėluojančių dienų efektas yra artimas 0, nedarantis įtakos prametimo procentui. Taip pat matome, kad didžiausią efektą sukelia praeitos ir užpraeitos dienos mažiausios temperatūros. Taigi, jei per 5 dienas (įskaitant einamą), nors vieną dieną yra stebima žema lauko temperatūra, didėja šansas jog turėsime padidėjusį R0402 korpuso komponentų prametimo procentą. Kiek tiksliai galėtume prognozuoti prametimo procentą galime pasakyti iš sudaromų modelių R kvadrato reikšmių, kurios parodo, kokį procentą prognozuojamos reikšmės išsibarstymo galime paaiškinti temperatūros variacija.  
+
+
+```{r, fig.width=10, fig.height=4, echo=FALSE}
+lapply(0:30, data_lag, data = all_dates_data) %>% 
+  bind_rows() %>%
+  filter(Percent > 0.2) %>%
+  group_by(lag) %>%
+  do(model = lm(Percent ~ min_temp_cap, data = .)) %>%
+  glance(model) %>%
+  select(lag, r.squared) %>%
+  ggplot(aes(x = lag, y = r.squared)) +
+  geom_line() +
+  geom_point(size = 2.3) +
+  geom_text(aes(label = lag), nudge_y = 0.02, size = 2.5) +
+  xlab("Lag") +
+  ylab("R squared") +
+  theme_bw()
+```
+
+
+Matome, kad rezultatas atitinka prieš tai gautus parodymus: kiekviena iš 4 dienų (įskaitant einamą) temperatūrų  paaiškina apie 20%-34% prametimo procento pokyčių, penktos dienos  - apie 12% (ganėtinai mažas efektas), o pagal kitas vėluojančias dienas progrozuoti efekto jau praktiškai nebegalime. Taigi nors visiškai tiksliai nuspėti prametimo procento pagal lauko temperatūrą negalime, tačiau daroma įtaka yra akivaizdi.
+
+
+## Prametimai skirtingomis savaitės dienomis
+
+
+Kadangi lauko temperatūra matomai daro įtaką prametimo procentui, bet pilnai nepaaiškina visų pokyčių, pamėginsime surasti papildomų veiksnių. Galbūt galime pastebėti skirtingą prametimų procento dydį skirtingomis savaitės dienomis?
+
+
+```{r, fig.width=8, fig.height=8, echo=FALSE}
+daily_data %>% 
+  mutate(Weekday = wday(Date, label = TRUE, abbr = FALSE)) -> weekdays_data
+
+weekdays_data %>% 
+  ggplot(aes(x = Weekday, y = Percent, group = Weekday)) +
+  geom_boxplot(varwidth = TRUE) +
+  xlab("") +
+  theme_bw()
+```
+
+
+Iš stačiakampės diagramos matome, kad visomis savaitės dienomis procento pasiskirstymas yra ganėtinai panašus, galime pastebėti tik ypač didelį prametimo procentą pasiekiančias dienas pirmadienį, kai tuo tarpu kitos dienos tokių didelių procentų nepasiekia. Toliau pažvelkime į savaitės dienų vidutinius prametimus, jų standartinius nuokrypius ir mažiausių dienos temperatūrų vidurkį:
+
+
+```{r, echo=FALSE}
+weekdays_data %>% 
+  group_by(Weekday) %>% 
+  summarize(Mean_percent = round(mean(Percent), 2),
+            Standard_deviation = round(sd(Percent), 2),
+            Number_of_days = n(),
+            Mean_min_temp = round(mean(Min.Temperature), 2)) %>% 
+  knitr::kable()
+```
+
+
+Galime pastebėti akivaizdžiai didesnį vidutinį prametimo procentą pirmadienį, kurį labiausiai paveikė būtent mūsų matytos ekstremalios reikšmės. Tą parodo ir kartu didžiausias standartinis nuokrypis. Ši diena taip pat turi ir mažiausią minimalių dienos temperatūrų vidurkį, taigi tai tik patvirtina, jog ypač žemos lauko temperatūros sukelia ypatingai didelius prametimų kiekius. Ar skirtumai tarp prametimų vidurkių yra statistiškai reikšmingi ir savaitės dieną galėtume įtraukti prie efektą prametimo procentui sukeliančių kintamųjų? Remsimės Welch testo vidurkiams lyginti rezultatu:
+
+
+```{r, echo=FALSE}
+oneway.test(Percent ~ Weekday, data = weekdays_data)
+```
+
+
+Iš testo p-reikšmės matome, kad negalime atmesti hipotezės, jog visų dienų vidurkiai yra lygūs. Galime spręsti, kad savaitės diena neturi statistiškai reikšmingos įtakos prametimo procentui.
+
+
+## Skirtingų mašinų prametimų procentai
+
+
+Toliau palyginsime mūsų turimų mašinų: AX301(83183) ir AX501(85399), prametimų procentus ir jų priklausomybę nuo lauko temperatūros. Pirmiausia pažvelkime į bendrus duomenis:
+
+
+```{r, echo=FALSE}
+errors_sqlite %>%
+  filter(PackageTypeName == c("R0402")) %>%
+  filter(Date >= "2015-01-01", Date < "2016-07-01") %>%
+  group_by(Machine, Date) %>%
+  select(-PackageTypeName, -Time, -ProcessProgramID, -PMSlot, 
+         -FeederSlot, -FeederLane, -FeederType) %>%
+  summarise_each(funs(sum)) %>% 
+  as.data.frame() %>%
+  mutate(., ErrorsSum  = rowSums(.[ ,3:13])) %>%
+  mutate(., Placed  = rowSums(.[ ,14:15])) %>%
+  select(-(AutoRepickAfterPickError:NumberOfCAlignPlacements)) %>%
+  group_by(Machine, Date) %>%
+  summarise(ErrorsSum = sum(ErrorsSum),
+            Placed = sum(Placed),
+            Percent = as.numeric(paste(round(ErrorsSum/Placed*100,2), sep = ""))) %>%
+  filter(Placed > 1000) %>%
+  right_join(daily_temp, by = "Date") %>%
+  select(-ErrorsSum, -X) %>%
+  ungroup() %>%
+  select(Machine, Date, Placed, Percent, Min.Temperature) %>%
+  na.omit() -> machine_data
+
+
+machine_data %>%
+  group_by(Machine) %>%
+  summarise(Number_of_days = n(),
+            Placements = sum(Placed),
+            Percent_mean = mean(Percent),
+            Percent_standard_deviation = sd(Percent)) %>% 
+  knitr::kable()
+```
+
+
+AX301 padeda apie 4.6 karto daugiau R0402 korpuso komponentų, nes linijoje stovi pirmesnė, o R0402 yra pakankamai smulkūs, kad juos geriau yra dėti pirmiau nei kitus komponentus. Taip pat galime pastebėti, jog dienos prametimų procentų vidurkis šioje mašinoje taip pat didesnis, tačiau kartu didesnis ir standartinis nuokrypis, taigi vidurkių skirtumas didžiausią įtaką daro stebėti ypač dideli prametimų procentai tam tikromis dienomis. Tą galima pastebėti iš žemiau esančio grafiko:
+
+
+```{r, fig.width=8, fig.height=6, echo=FALSE}
+machine_data %>%
+  ggplot(aes(x = Machine, y = Percent)) +
+  geom_violin(aes(color = Machine)) +
+  theme_bw()
+```
+
+
+Prametimų pasiskirstymas yra labai panašus, o sprendžiant pagal Welch testą, prametimų procentų vidurkiai nėra statistiškai skirtingi.
+
+
+```{r, echo=FALSE}
+oneway.test(Percent ~ Machine, data = machine_data)
+```
+
+
+Dar galime patikrinti abiejų mašinų prametimo procento priklausomybę nuo lauko oro mažiausios dienos temperatūros, apribotos ties 0°C iš apačios. Rezultatas rodo, jog priklausomybė taip pat yra statistiškai reikšminga. Priklausomybę galime įžiūrėti ir žemiau esančiame grafike.
+
+
+```{r, echo=FALSE}
+machine_data %>%
+  mutate(MinTempCap = ifelse(Min.Temperature > 0, 0, Min.Temperature)) %>%
+  group_by(Machine) %>%
+  do(model = lm(Percent ~ MinTempCap, data = .)) %>%
+  tidy(model) %>%
+  filter(term != "(Intercept)") %>%
+  ungroup() %>%
+  arrange(p.value) %>% 
+  knitr::kable(digits = 22)
+```
+
+
+```{r, fig.width=10, fig.height=6, echo=FALSE}
+machine_data %>%
+  mutate(MinTempCap = ifelse(Min.Temperature > 0, 0, Min.Temperature),
+         Date = as.Date(Date)) %>%
+  ggplot(aes(x = Date, y = Percent)) +
+  geom_line(size = 1) +
+  geom_line(aes(y = MinTempCap), 
+            color = "red", size = 1) +
+  scale_x_date(labels = date_format("%Y-%m"), date_breaks = "1 month") +
+  facet_wrap(~Machine, nrow = 2) +
+  theme_bw() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+```
+
+
+Pastebime jog beveik visais didesnio prametimo procento atvejais matoma atitinkamai žema temperatūra, tačiau žema temperatūra ne visada sukelia didelį prametimo procentą. Tą galima spręsti ir iš prieš tai nagrinėtų modelių gautų R kvadrato reikšmių, kuomet matėme, kad temperatūros paaiškina apie 20-35% prametimo procento reikšmių.
+
+
+## Skirtingų robotų prametimų procentai
+
+
+Ar prametimų procento priklausomybė nuo mažiausios lauko oro temperatūros išlieka ir tiriant atskirus robotus? Pirmiausia pažvelkime į bendrų duomenų lentelę:
+
+
+```{r, echo=FALSE}
+errors_sqlite %>%
+  filter(PackageTypeName == c("R0402")) %>%
+  filter(Date >= "2015-01-01", Date < "2016-07-01") %>%
+  group_by(Machine, PMSlot, Date) %>%
+  select(-PackageTypeName, -Time, -ProcessProgramID, 
+         -FeederSlot, -FeederLane, -FeederType) %>%
+  summarise_each(funs(sum)) %>% 
+  as.data.frame() %>%
+  mutate(., ErrorsSum  = rowSums(.[ , 4:14])) %>%
+  mutate(., Placed  = rowSums(.[ , 15:16])) %>%
+  select(-(AutoRepickAfterPickError:NumberOfCAlignPlacements)) %>%
+  group_by(Machine, PMSlot, Date) %>%
+  summarise(ErrorsSum = sum(ErrorsSum),
+            Placed = sum(Placed),
+            Percent = as.numeric(paste(round(ErrorsSum/Placed*100,2), sep = ""))) %>%
+  filter(Placed > 1000) %>% # ~84% duomenu
+  right_join(daily_temp, by = "Date") %>%
+  select(-X) %>%
+  ungroup() %>%
+  select(Machine, PMSlot, Date, Placed, ErrorsSum, Percent, Min.Temperature) %>%
+  na.omit() -> PMslot_data
+
+
+PMslot_data %>%
+  group_by(Machine, PMSlot) %>%
+  summarise(n_days = n(),
+            placements = sum(Placed),
+            errors = sum(ErrorsSum),
+            percent = round(errors*100 / placements,4)) -> PMslot_data_group
+  
+PMslot_data_group %>% 
+  knitr::kable(digits = 2)
+```
+
+
+Kaip jau matėme, AX301(83183) mašinos R0402 korpuso komponentų padėjimai stipriai viršija AX501(85399) padėjimus. Kadangi buvo matuojamos dienos, kuomet atitinkamo roboto padėtų komponentų skaičius viršija 1000 vnt. (išlieka ~84% duomenų), AX501 matuojamų dienų skaičius taip pat akivaizdžiai mažesnis. Vizualiai robotų padėjimu skaičius atrodo taip:
+
+
+```{r, fig.width=6, fig.height=3, echo=FALSE}
+PMslot_data_group %>%
+  ggplot(aes(x = PMSlot, y = placements)) +
+  geom_bar(stat = "identity") +
+  facet_grid(~Machine) +
+  geom_text(aes(y = placements, label = PMSlot), 
+            nudge_y = 70000, size = 3) +
+  theme_bw() +
+  theme(axis.text.x = element_blank(),
+        axis.ticks.x = element_blank(),
+        legend.position = "none")
+```
+
+
+AX501 tik 3 ir 13 robotų padėjimai yra arčiau AX301 robotų padėjimų, o kiti - smarkiai atsilieka. Iš sekančios diagramos matome, jog prametimų procentų pasiskirstymas AX301 visuose robotuose yra panašus, o AX501 išsiskiria robotai, turintys palyginus mažą padėjimų skaičių.
+
+
+```{r, fig.width=8, fig.height=8, echo=FALSE}
+PMslot_data %>%
+  ggplot(aes(x = as.factor(PMSlot), y = Percent)) +
+  geom_boxplot(aes(color = Machine), varwidth = TRUE) +
+  ylim(c(0, 10)) +
+  labs(x = "PMSlot") +
+  theme_bw() +
+  facet_grid(~Machine) +
+  theme(legend.position = "none")
+```
+
+
+Tačiau svarbiausia yra patikrinti, ar kiekvieno roboto atskirai stebėti prametimo procentai tiesiškai priklauso nuo tos dienos mažiausios lauko temperatūros (šias, kaip ir anksčiau, apribosime ties 0°C iš viršaus). Sudarome tiesinės regresijos lygtis kiekvienam robotui ir gauname tokius rezultatus, pažymėdami statistiškai reikšmingus (p.value > 0.05) koeficientus prie temperatūros kintamojo:
+
+
+```{r, echo=FALSE}
+PMslot_data %>%
+  mutate(MinTempCap = ifelse(Min.Temperature > 0, 0, Min.Temperature)) %>%
+  group_by(Machine, PMSlot) %>%
+  do(model = lm(Percent ~ MinTempCap, data = .)) %>% 
+  tidy(model) %>%
+  filter(term != "(Intercept)") %>%
+  ungroup() %>%
+  select(Machine, PMSlot, estimate, p.value) %>%
+  mutate(significant = ifelse(p.value < 0.05, "YES", "")) %>% 
+  knitr::kable(digits = c(5,2,2,6,3))
+```
+
+
+Pirmiausia matome, kad visi koeficientai prie temperatūros kintamojo yra neigiami, t.y. temperatūrai mažėjant prametimai didėja. Šie koeficientai yra statistiškai reikšmingi visuose robotuose AX301 ir 
+daugumoje AX501 robotų. Nereikšmingi AX501 17-tas ir 19-tas robotų koeficientai greičiausiai yra dėl palyginti labai mažo padėtų komponentų skaičiaus, o 5-tas robotas yra ant reikšmingumo ribos. Taigi galime spręsti, jog prametimų priklausomybė nuo temperatūros egzistuoja nepriklausomai nuo nagrinėjamo roboto, t.y. galioja visiems daugiau R0402 korpuso komponentų padedantiems robotams. Vizualiai visi sudaryti tiesinės regresijos modeliai atrodo taip:
+
+
+```{r, fig.width=10, fig.height=6, echo=FALSE, warning=FALSE}
+PMslot_data %>%
+  mutate(MinTempCap = ifelse(Min.Temperature > 0, 0, Min.Temperature)) %>%
+  ggplot(aes(x = MinTempCap, y = Percent)) +
+  geom_point(size = 1, alpha = 0.5) +
+  stat_smooth(method = "lm") +
+  ylim(c(0, 15)) +
+  facet_grid(Machine ~ PMSlot) +
+  theme_bw() +
+  theme(axis.text.x = element_text(size = 6))
+```
+
+
+Beveik visuose robotuose pastebima tendencija, jog dideli prametimo procentai dauguma atvejų atsiranda tik temperatūrai esant žemesnei nei 0°C. Tai ypač gerai matoma ir laikinėje diagramoje,
+kurioje pavaizduota kiekvieno roboto 2015-01-01 - 2016-06-30 laikotarpio prametimo procento (juoda linija) ir 0°C temperatūra iš viršaus atribotos mažiausios dienos lauko oro temperatūros (raudona linija) reikšmės:
+
+
+```{r, fig.width=10, fig.height=8, echo=FALSE, warning=FALSE}
+PMslot_data %>%
+  mutate(MinTempCap = ifelse(Min.Temperature > 0, 0, Min.Temperature),
+         Date = as.Date(Date),
+         Percent = pmin(Percent, 15)) %>%
+  ggplot(aes(x = Date, y = Percent)) +
+  geom_line(size = 0.8) +
+  geom_line(aes(y = MinTempCap), 
+            color = "red", size = 0.8) +
+  scale_x_date(labels = date_format("%Y-%m"), date_breaks = "1 month") +
+  facet_grid(PMSlot ~ Machine) +
+  theme_bw() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+```
+
+
+## Prametimai ir dienų su žemesne nei 0°C temperatūra kiekis
+
+
+Iš ankstesnių grafikų matėme, kad didesnį jei normalus prametimų procentą dažnai lydi ir žemesne nei 0°C lauko oro mažiausia dienos temperatūra, kuri gali tokia būti nebūtinai einamąją dieną, bet ir nuo vienos iki keturių dienų prieš. Jeigu prametimo procentas nepriklausytų nuo lauko temperatūros, tuomet, keičiantis prametimo procentui, dienų, turinčių aukštesnę arba žemesnę nei 0°C temperatūrą, santykis vingiuotų aplink bendrą vidurkį. Taigi tirsime tokių dienų santykį, išskirdami dienas su vis didesniu mažiausiu prametimo procentu, pvz.: koks procentas dienų su mažesne nei 0°C temperatūra buvo tomis dienomis, kuomet prametimų procentas - didenis nei 1% ir t.t. Išskirsime 2 atvejus:
+- Įskaičiuojama, jei mažiausia einamos dienos lauko oro temperatūra buvo nukritusi žemiau 0°C. Per visą tiriamą laikotarpį tokių dienų buvo ~25%.
+- Įskaičiuojama, jei mažiausia paskutinių 5 dienų (įskaitant einamąją) lauko oro temperatūra buvo nukritusi žemiau 0°C. Per visą tiriamą laikotarpį tokių dienų buvo ~41%.
+Gauname tokius rezultatus:
+
+
+```{r, fig.width=10, fig.height=4, echo=FALSE, warning=FALSE}
+errors_sqlite %>%
+  filter(PackageTypeName == c("R0402")) %>%
+  filter(Date >= "2015-01-01", Date < "2016-07-01") %>%
+  group_by(Date) %>%
+  select(-PackageTypeName, -Time, -ProcessProgramID, -PMSlot, 
+         -FeederSlot, -FeederLane, -FeederType, -Machine) %>%
+  summarise_each(funs(sum)) %>% 
+  as.data.frame() %>%
+  mutate(., ErrorsSum  = rowSums(.[ ,2:12])) %>%
+  mutate(., Placed  = rowSums(.[ ,13:14])) %>%
+  select(-(AutoRepickAfterPickError:NumberOfCAlignPlacements)) %>%
+  group_by(Date) %>%
+  summarise(ErrorsSum = sum(ErrorsSum),
+            Placed = sum(Placed),
+            Percent = as.numeric(paste(round(ErrorsSum/Placed*100,2), sep = ""))) %>%
+  filter(Placed > 1000) %>%
+  right_join(daily_temp, by = "Date") %>%
+  select(-ErrorsSum, -X) %>%
+  ungroup() %>%
+  mutate(MinTempLag1 = lag(Min.Temperature, 1),
+         MinTempLag2 = lag(Min.Temperature, 2),
+         MinTempLag3 = lag(Min.Temperature, 3),
+         MinTempLag4 = lag(Min.Temperature, 4)) %>%
+  rowwise() %>%
+  mutate(MinTemp5 = min(Min.Temperature,
+                       MinTempLag1,
+                       MinTempLag2,
+                       MinTempLag3,
+                       MinTempLag4)) %>%
+  select(Date, Placed, Percent, MinTemp5, Min.Temperature) %>%
+  na.omit() %>% 
+  mutate(below_zero5 = MinTemp5 < 0,
+         below_zero = Min.Temperature < 0) -> days5_min_temp_data
+
+percent_seq <- seq(0, 10, 0.2)
+seq_length <- length(percent_seq)
+below_zero_days_df <- data.frame(min_errors_percent = rep(0, seq_length),
+                                 below_zero5_days_percent = rep(0, seq_length),
+                                 below_zero_days_percent = rep(0, seq_length),
+                                 n_days = rep(0, seq_length))
+
+
+for (i in 1:length(percent_seq)) {
+  percent <- percent_seq[i]
+  below_zero_days_df[i, 1] <- percent
+  
+  days5_min_temp_data %>% 
+    filter(Percent > percent) %>% 
+    summarize(below_zero5_percent = mean(below_zero5)) %>% 
+    .[[1]] %>% 
+    round(2) -> below_zero_days_df[i, 2]
+  
+  days5_min_temp_data %>% 
+    filter(Percent > percent) %>% 
+    summarize(below_zero_percent = mean(below_zero)) %>% 
+    .[[1]] %>% 
+    round(2) -> below_zero_days_df[i, 3]
+  
+  days5_min_temp_data %>% 
+    filter(Percent > percent) %>% 
+    summarize(n_days = n()) %>% 
+    .[[1]] %>% 
+    round(2) -> below_zero_days_df[i, 4]
+}
+
+
+below_zero_days_df %>% 
+  ggplot(aes(x = min_errors_percent,
+             y = below_zero_days_percent)) +
+  geom_line(size = 1, aes(color = "Current day")) +
+  geom_line(aes(y = below_zero5_days_percent, 
+                color = "Last 5 days"),
+            size = 1) +
+  geom_abline(intercept = below_zero_days_df$below_zero_days_percent[1],
+              slope = 0,
+              color = "skyblue3",
+              linetype="longdash") +
+  annotate("text", 
+           x = 8, 
+           y = below_zero_days_df$below_zero_days_percent[1] + 0.03,
+           color = "skyblue3",
+           label = "Mean percent of days below zero") +
+  geom_abline(intercept = below_zero_days_df$below_zero5_days_percent[1],
+              slope = 0,
+              color = "blue",
+              linetype="longdash") +
+  annotate("text", 
+           x = 8, 
+           y = below_zero_days_df$below_zero5_days_percent[1] + 0.03,
+           color = "blue",
+           label = "Mean percent of days below zero") +
+  scale_x_continuous(breaks = c(0:10), 
+                     labels = paste0(">", c(0:10),"%")) +
+  scale_y_continuous(breaks = seq(0, 1, 0.2), 
+                     labels = paste0(seq(0, 100, 20),"%")) +
+  labs(x = "Minimum errors percent",
+       y = "Percent of days below zero") +
+  scale_colour_manual(name = "",
+                      values = c("Current day" = "skyblue3",
+                                 "Last 5 days" = "blue")) +
+  theme_bw()
+```
+
+
+Kaip matome, dienų su žemesne nei 0°C temperatūra procentas ne tik kad nesilaiko apie vidurkį, bet ir staigiai šauna į viršų: pavyzdžiui dienomis, kuomet prametimo procentas buvo 1% ir daugiau, apie 67% iš jų turėjo žemesnę nei 0°C temperatūrą, o jei tikrinsime paskutinių 5 dienų minimumą, tuomet tokių dienų buvo net 89%. Šie skaičiai yra daugiau nei dvigubai didesni už tikėtinas reikšmes (atitinkamai 25% ir 41%). O prametimo procentui esant virš 3.2%, iš 11 tokių dienų visomis iš jų galima buvo užfiksuoti neigiamą temperatūrą nors vieną iš 5 praeitų dienų nuo tiriamosios. Šie rezultatai dar kartą įrodo neigiamą mažiausią dienos lauko oro temperatūrą esant kaip didesnio nei normalus prametimo procento sukėlėją.
+
+
+## Kitų korpusų komponentų priklausomybė nuo lauko temperatūros
+
+
+Iki šio momento tyrinėjome tik R0402 korpuso komponentus ir nustatėme jų prametimo procento priklausomę nuo mažiausios dienos lauko oro temperatūros. Ar ši priklausomybė galioja ir kito korpuso komponentams? Norėdami atsakyti į ši klausimą ištirsime visus AX301 ir AX501 padėtus korpusus, sudarysime jų tiesinės regresijos lygtis, rasime statistiškai reikšmingas tiesines priklausomybes nuo lauko temperatūros ir panagrinėsime jas atskirai.
+
+Pirmiausia pažvelgsime į bendras prametimų tendencijas. Iš viso buvo padėta 407 skirtingų korpusų komponentų, iš kurių atrinksime tik tuos, kurių per visą tiriamą laikotarpį (2015-01-01 - 2016-06-30) buvo padėta bent 10000 vnt. Po šio filtro lieka 100 skirtingų korpusų. Iš atrinktų korpusų daugiausia prametimų buvo užfiksuota (top 15):
+
+
+```{r, echo=FALSE}
+errors_sqlite %>%
+  select(PackageTypeName, NumberOfLAlignPlacements, NumberOfCAlignPlacements) %>%
+  mutate(Placed = NumberOfLAlignPlacements + NumberOfCAlignPlacements) %>%
+  group_by(PackageTypeName) %>%
+  summarize(Placed = sum(Placed)) %>%
+  filter(Placed > 10000) %>%
+  arrange(desc(Placed)) %>%
+  as.data.frame() %>%
+  .[["PackageTypeName"]] -> pop_packages
+
+
+errors_sqlite %>%
+  filter(Date >= "2015-01-01", Date < "2016-07-01") %>%
+  filter(PackageTypeName %in% pop_packages) %>%
+  group_by(Date, PackageTypeName) %>%
+  select(-Time, -Machine, -ProcessProgramID, -PMSlot, 
+         -FeederSlot, -FeederLane, -FeederType) %>%
+  summarise_each(funs(sum)) %>% 
+  as.data.frame() %>%
+  mutate(., ErrorsSum  = rowSums(.[ ,3:13])) %>%
+  mutate(., Placed  = rowSums(.[ ,14:15])) %>%
+  select(-(AutoRepickAfterPickError:NumberOfCAlignPlacements)) %>%
+  group_by(Date, PackageTypeName) %>%
+  summarise(ErrorsSum = sum(ErrorsSum),
+            Placed = sum(Placed),
+            Percent = as.numeric(paste(round(ErrorsSum/Placed*100,2), sep = ""))) %>%
+  left_join(daily_temp, by = "Date") %>% 
+  ungroup() %>% 
+  mutate(Date = as.Date(Date)) -> top_package_data
+
+
+top_package_data %>% 
+  group_by(PackageTypeName) %>% 
+  summarize(ErrorsSum = sum(ErrorsSum),
+            PlacedSum = sum(Placed),
+            Percent = ErrorsSum/PlacedSum*100) %>% 
+  select(PackageTypeName, ErrorsSum, PlacedSum, Percent) %>% 
+  arrange(-ErrorsSum) %>% 
+  head(15) %>% 
+  knitr::kable(digits = 2)
+```
+
+
+Matome, jog mūsų tirtas R0402 korpusas turi didžiausią prametimų kiekį, o po jo seka ir išsiskiria populiariausi korpusai: R0603, C0402, C0603. Iš jų C0402 ir C0603 patenka į deklaruojamą leidžiamą prametimo procentą - 0.2%, o R0603, jei šis neparodys priklausomybės nuo temperatūros, paliksime tyrimams kitam kartui. Prieš tirdami prametimų priklausomybę nuo temperatūros, išmesime dienas, kuriomis atskiro korpuso komponentų buvo padėta mažiau nei 500 (lieka 7784 matavimai iš 10049, ~77%), taip eliminuodami prototipų ir kitus mažo kiekio rinkimus, kuomet komponentų paėmimai ir padėjimai dar nėra stabilizavęsi. Taip pat prametimus laikysime priklausomus nuo temperatūros jeigu tiesinės regresijos koeficientas prie temperatūros kintamojo bus didesnis nei 0.01 (20°C temperatūros pokytis sudarytų vos 0.2% prametimų pokytį) ir to koeficiento p-reikšmė bus didesnė jei 0.01. Sudarę 100 tiesinės regresijos lygčių (kiekvienam iš mūsų 100 tiriamų korpusų), gauname tokius rezultatus:
+
+
+```{r, echo=FALSE}
+top_package_data %>%
+  filter(Placed > 500) %>% 
+  group_by(PackageTypeName) %>%
+  do(model = lm(Percent ~ Mean.Temperature, data = .)) %>%
+  tidy(model) %>%
+  ungroup() %>%
+  filter(term != "(Intercept)",
+         p.value < 0.01,
+         abs(estimate) > 0.01) %>%
+  arrange(p.value) %>% 
+  select(PackageTypeName, estimate, p.value) -> temp_dependant
+
+temp_dependant %>% 
+  knitr::kable(digits = c(1,2,16))
+```
+
+
+```{r, fig.width=10, fig.height=3, echo=FALSE, warning=FALSE}
+top_package_data %>% 
+  filter(PackageTypeName %in% temp_dependant$PackageTypeName) %>%
+  ggplot(aes(x = Mean.Temperature, 
+             y = Percent)) +
+  geom_point(size = 2) +
+  stat_smooth(method = "lm") +
+  ylim(c(0,10)) +
+  facet_wrap(~PackageTypeName) +
+  theme_bw()
+```
+
+
+Kaip matome, tik 3 korpusų komponentų prametimai parodė priklausomybę nuo vidutinės lauko temperatūros: R0402 ir SOD128 turi neigiamą priklausomybę, o SH1252-W-04-AT - teigiamą, t.y. didėjant temperatūrai didėja ir prametimų procentas. Kadangi R0402 tirėme jau anksčiau, atidžiau pažvelgsime į likusius du korpusus. Pirmiausia brėžiame SOD128 korpuso prametimų ir temperatūrų laiko grafiką:
+
+
+```{r, fig.width=10, fig.height=4, echo=FALSE, warning=FALSE}
+top_package_data %>% 
+  filter(PackageTypeName == "SOD128") %>% 
+  ggplot(aes(x = Date, y = Percent)) +
+  geom_line(aes(color = "Percent"),
+            size = 1) +
+  geom_line(aes(y = Mean.Temperature,
+                color = "Temperature"), 
+            size = 1) +
+  geom_point(aes(color = "Percent"),
+             size = 2) +
+  geom_point(aes(y = Mean.Temperature,
+                color = "Temperature"), 
+             size = 2) +
+  scale_x_date(labels = date_format("%Y-%m"), date_breaks = "1 month") +
+  scale_colour_manual(name = "",
+                      values = c("Percent" = "grey25",
+                                 "Temperature" = "red")) +
+  labs(y = "Percent/Temperature",
+      title = "SOD128") +
+  theme_bw() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+```
+
+
+Iš šio korpuso grafiko sunkiai galime įžiūrėti rastą priklausomybę, todėl SOD128 toliau net nebenagrinėsime. Toliau žiūrime į SH1252-W-04-AT korpuso grafiką. Jame, kaip ir R0402 atveju, apribosime mažiausią temperatūrą ties 0°C dėl geresnės vizualizacijos ir temperatūras invertuosime į apačią, tačiau išlaikysime jas tik teigiamas. Kartu brėžiamos ir glotninimo kreivės.
+
+
+```{r, fig.width=10, fig.height=6, echo=FALSE, warning=FALSE}
+top_package_data %>% 
+  filter(PackageTypeName == "SH1252-W-04-AT",
+         Placed > 500) %>% 
+  rowwise() %>% 
+  mutate(Mean.Temperature = min(-Mean.Temperature, 0)) %>% 
+  ggplot(aes(x = Date, y = Percent*3)) +
+  geom_segment(aes(xend = Date, 
+                   yend = 0)) +
+  geom_point(aes(color = "Percent"),
+            size = 2) +
+  stat_smooth(se = FALSE, 
+              color = "grey25",
+              span = 0.15) +
+  stat_smooth(aes(y = Mean.Temperature),
+              se = FALSE,
+              color = "red",
+              span = 0.15) +
+  geom_segment(aes(xend = Date, 
+                   y = Mean.Temperature,
+                   yend = 0,
+                   color = "Temperature")) +
+  geom_point(aes(y = Mean.Temperature,
+                color = "Temperature"), 
+            size = 2) +
+  scale_x_date(labels = date_format("%Y-%m"), date_breaks = "1 month") +
+  scale_y_continuous(breaks = seq(-25, 25, 5), labels = abs(seq(-25, 25, 5))) +
+  scale_colour_manual(name = "",
+                      values = c("Percent" = "grey25",
+                                 "Temperature" = "red")) +
+  labs(y = "Temperature / Percent",
+       title = " SH1252-W-04-A") +
+  theme_bw() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+```
+
+
+Panašu, jog kylant temperatūrai, didėja ir prametimo procentas, nors priklausomybė ir nėra tokia akivaizdi ir tiksli kaip R0402 atveju. Galime įžvelgti sezoniškumą - šiltesniu metų laiku prametimų procentai tampa didesni, jie daugiau priklausomi ne nuo einamos ar kelių vėluojančių dienų temperatūros, o nuo metų laiko. Vienas iš galimų paaiškinimų būtų skirtingų gamintojų tiekiami komponentai, iš kurių vieni iš tikrųjų turėjo problemą su įpakavimu, dėl ko ritės gale esantys komponentai nestovėdavo lygiagrečiai ir buvo sunkiau paimami, taigi turėjo didesnį prametimo procentą. O gal šiltesnė oro temperatūra paveikė būtent to gamintojo rites, jei šios turi kokį nors trūkumą? Kolkas į šį klausimą atsakymo neturime.
