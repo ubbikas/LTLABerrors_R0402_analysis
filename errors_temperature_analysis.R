@@ -2323,7 +2323,13 @@ suppressPackageStartupMessages(require(dplyr))
 suppressPackageStartupMessages(require(lubridate))
 suppressPackageStartupMessages(require(knitr))
 
-setwd(paste0(getwd(),"/LTLAB errors analysis"))
+# nustatomas darbinis katalogas priklausomai nuo kompo
+if (Sys.info()[[4]] == "ANDRIUS-PC")
+  setwd("D:/-=Works=-/R/GitHub/LTLABerrors_R0402_analysis")
+
+if (Sys.info()[[4]] == "LTLAB-DEV")
+  setwd("C:/R/GitHub/LTLABerrors_R0402_analysis")
+
 DBFileName <- "LTLABerrors.sqlite"
 errors_db_sqlite <- src_sqlite(DBFileName)
 errors_sqlite <- tbl(errors_db_sqlite, "HOUR_ERRORS")
@@ -2407,6 +2413,153 @@ cat("\014")
 kable(test_data %>% 
       mutate(Percent_bin = ifelse(Percent_bin == "Above", "Error", "Good")))
 predict_errors(test_data)
+
+
+##################################################################################
+### Predictions of good/bad placement of given day (classification) --------------
+##################################################################################
+
+
+suppressPackageStartupMessages(require(caret))
+suppressPackageStartupMessages(require(dplyr))
+suppressPackageStartupMessages(require(lubridate))
+suppressPackageStartupMessages(require(rvest))
+suppressPackageStartupMessages(require(scales))
+
+
+# nustatomas darbinis katalogas priklausomai nuo kompo
+if (Sys.info()[[4]] == "ANDRIUS-PC")
+  setwd("D:/-=Works=-/R/GitHub/LTLABerrors_R0402_analysis")
+
+if (Sys.info()[[4]] == "LTLAB-DEV")
+  setwd("C:/R/GitHub/LTLABerrors_R0402_analysis")
+
+
+predict_errors <- function(data) {
+  suppressPackageStartupMessages({
+    load("models/gbm_modelC_for_errors.RData")
+    load("models/rpart_modelC_for_errors.RData")
+    load("models/glm_modelC_for_errors.RData")
+    
+    cat("Error chance:", "\n")
+    cat(paste0("GBM:   ", 
+               round(predict(modelC_gbm, data, type = "prob")$Above*100, 0),
+               "%"),
+        "\n")
+    cat(paste0("RPART: ", 
+               round(predict(modelC_rpart2, data, type = "prob")$Above*100, 0),
+               "%"),
+        "\n")
+    cat(paste0("GLM:   ", 
+               round(predict(modelC_glm1var, data, type = "prob")$Above*100, 0),
+               "%"),
+        "\n")
+  })
+}
+
+
+predict_date_errors <- function(date) {
+  
+  pb <- txtProgressBar(style = 3)
+  
+  measurements <- c("Mean Temperature",
+                    "Max Temperature",
+                    "Min Temperature",
+                    "Dew Point",
+                    "Average Humidity",
+                    "Maximum Humidity",
+                    "Minimum Humidity",
+                    "Precipitation",
+                    "Sea Level Pressure",
+                    "Wind Speed",
+                    "Max Wind Speed")
+  
+  date <- as.Date(date)
+  
+  all_dates <- c(date - days(1),
+                 date - days(2),
+                 date - days(3))
+
+  all_data <- list()
+  
+  inc <- 0
+
+  for (date in all_dates) {
+
+    date <- as.Date(date, origin = "1970-01-01")
+    d = day(date)
+    m = month(date)
+    y = year(date)
+    
+    url <- paste0("https://www.wunderground.com/history/airport/EYVI/", 
+                  y, "/", m,"/",d,
+                  "/DailyHistory.html?req_city=Vilnius+International&",
+                  "req_state=&req_statename=Lithuania&reqdb.zip=00000&",
+                  "reqdb.magic=5&reqdb.wmo=26730")
+    
+    data <- read_html(url)
+  
+    data %>%
+      html_nodes("#historyTable") %>%
+      html_text() %>%
+      gsub("\n", "", .) %>%
+      gsub("\t", "", .) %>%
+      gsub("Â", "", .) -> data1
+    
+    
+    date_data <- list()
+    
+    for (i in measurements) {
+      data1 %>%
+        gregexpr(paste0(i,"\\s*.\\d+\\.?\\d*"), .) -> x
+      
+      data1 %>%
+        regmatches(x) %>%
+        unlist() %>%
+        gsub(i, "", .) %>%
+        gsub(" ", "", .) %>%
+        .[1] -> value
+      date_data[[i]] <- value
+    }
+    
+    date_data[["Date"]] <- date
+    all_data[[as.character(date)]] <- as.data.frame(date_data, stringsAsFactors = FALSE)
+    
+    Sys.sleep(3)
+    inc <- inc + 0.3
+    setTxtProgressBar(pb, inc)
+  }
+  
+  all_data_df <- do.call(rbind, all_data)
+  
+  all_dates <- as.character(all_dates)
+  
+  data.frame(Max.TemperatureLag2 = all_data_df[all_dates[2], "Max.Temperature"] %>% 
+                                   as.integer(),
+             Min.TemperatureLag3 = all_data_df[all_dates[3], "Min.Temperature"] %>% 
+                                   as.integer(),
+             Min.TemperatureLag1.Cap = all_data_df[all_dates[1], "Min.Temperature"] %>% 
+                                       as.integer() %>% 
+                                       pmin(0)) -> data
+  
+  setTxtProgressBar(pb, 1)
+  close(pb)
+  
+  cat("-----------------------------------------------------------------", "\n")
+  cat("---", as.character(date), "---", "\n")
+  cat("-----------------------------------------------------------------", "\n")
+  print(data)
+  cat("-----------------------------------------------------------------", "\n")
+  predict_errors(data)
+}
+
+predict_date_errors("2016-01-14")
+
+
+
+
+
+
 
 
 
