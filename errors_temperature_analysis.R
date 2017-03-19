@@ -2556,10 +2556,103 @@ predict_date_errors <- function(date) {
 predict_date_errors("2016-01-14")
 
 
+##################################################################################
+### Post climate control analysis ------------------------------------------------
+##################################################################################
 
 
+suppressPackageStartupMessages(require(dplyr))
+suppressPackageStartupMessages(require(lubridate))
+suppressPackageStartupMessages(require(ggplot2))
+suppressPackageStartupMessages(require(scales))
+suppressPackageStartupMessages(require(viridis))
 
 
+# nustatomas darbinis katalogas priklausomai nuo kompo
+if (Sys.info()[[4]] == "ANDRIUS-PC")
+  setwd("D:/-=Works=-/R/GitHub/LTLABerrors_R0402_analysis")
+
+if (Sys.info()[[4]] == "LTLAB-DEV")
+  setwd("C:/R/GitHub/LTLABerrors_R0402_analysis")
 
 
+DBFileName <- "LTLABerrors.sqlite"
+errors_db_sqlite <- src_sqlite(DBFileName)
+errors_sqlite <- tbl(errors_db_sqlite, "HOUR_ERRORS")
+
+daily_temp <- read.csv("daily_temperatures.csv", stringsAsFactors = FALSE)
+
+
+errors_sqlite %>%
+  filter(Date >= "2015-01-01") %>%
+  filter(PackageTypeName == c("R0402")) %>%
+  group_by(Date, PackageTypeName) %>%
+  select(-Time, -Machine, -ProcessProgramID, -PMSlot, 
+         -FeederSlot, -FeederLane, -FeederType) %>%
+  summarise_each(funs(sum)) %>% 
+  as.data.frame() %>%
+  mutate(., ErrorsSum  = rowSums(.[ ,3:13])) %>%
+  mutate(., Placed  = rowSums(.[ ,14:15])) %>%
+  select(-(AutoRepickAfterPickError:NumberOfCAlignPlacements)) %>%
+  mutate(Percent = as.numeric(paste(round(ErrorsSum/Placed*100,2), sep = "")),
+         Post = as.factor(ifelse(Date > "2017-01-20", 1, 0))) %>%
+  filter(Placed > 1000) %>%
+  left_join(daily_temp, by = "Date") %>%
+  ungroup() -> daily_data
+
+
+ggplot(daily_data, aes(x = Min.Temperature, y = Percent, color = Post)) +
+  geom_point(size = 1.5, 
+             alpha = 0.5) +
+  stat_smooth(fill = NA, method = 'loess') +
+  scale_color_manual(values = c("black", "red")) +
+  theme_bw()
+
+
+daily_data %>%
+  mutate(capped_temp = ifelse(Min.Temperature > 0, 
+                              0, 
+                              Min.Temperature)) -> daily_capped_data
+
+
+ggplot(daily_capped_data, aes(x = as.Date(Date), y = Percent)) +
+  geom_line(aes(group = 1, 
+                colour = "Percent"), 
+            size = 0.8,
+            alpha = 0.8) +
+  geom_line(aes(y = capped_temp, 
+                group = 1,
+                colour = "Temperature\n(capped at 0°C)"), 
+            size = 0.8,
+            alpha = 0.8) +
+  scale_x_date(labels = date_format("%Y-%m"), date_breaks = "1 month") +
+  scale_colour_manual(name = "",
+                      values = c("Percent" = "grey25",
+                                 "Temperature\n(capped at 0°C)" = "red")) +
+  geom_vline(xintercept = as.numeric(as.Date("2017-01-23")),
+             linetype = 4,
+             color = "green",
+             size = 1) +
+  annotate("text", 
+           x = as.Date("2017-01-23") + 30,
+           y = 15, 
+           label = "Climate \n control") +
+  xlab("Date") +
+  ylab("") +
+  theme_bw() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+
+# without climate control
+daily_capped_data %>% 
+  filter(Post == 0) %>% 
+  lm(Percent ~ capped_temp, data = .) %>% 
+  summary()
+
+
+# with climate control
+daily_capped_data %>% 
+  filter(Post == 1) %>% 
+  lm(Percent ~ capped_temp, data = .) %>% 
+  summary()
 
